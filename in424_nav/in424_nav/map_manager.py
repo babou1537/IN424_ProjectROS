@@ -1,5 +1,5 @@
 __author__ = "Johvany Gustave, Jonatan Alvarez"
-__copyright__ = "Copyright 2024, IN424, IPSA 2024"
+__copyright__ = "Copyright 2025, IN424, IPSA 2025"
 __credits__ = ["Johvany Gustave", "Jonatan Alvarez"]
 __license__ = "Apache License 2.0"
 __version__ = "1.0.0"
