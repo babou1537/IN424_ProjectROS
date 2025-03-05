@@ -6,6 +6,8 @@ __version__ = "1.0.0"
 
 
 #Map cell values to set
-OBSTACLE_VALUE = 100    #to be displayed in black on RVIZ (with map color scheme)
+OBSTACLE_VALUE = 100
 FREE_SPACE_VALUE = 0
 UNEXPLORED_SPACE_VALUE = -1
+OTHER_AGENT_VALUE = 50
+PATH_VALUE = -5
