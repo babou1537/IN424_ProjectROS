@@ -101,7 +101,6 @@ class Agent(Node):
 
 
 
-
     def odom1_cb(self, msg):
         """ 
             @brief Get agent 1 position.
@@ -146,51 +145,6 @@ class Agent(Node):
         self.agents_pose[2] = (x, y)
         # self.get_logger().info(f"Agent 3: ({x:.2f}, {y:.2f})")
 
-    
-    # """VERSION 1"""
-    # def map_update(self):
-    #     """ Met à jour la carte de l'agent avec les données du LiDAR """
-    #     if self.x is None or self.y is None or not hasattr(self, 'lidar_data'):
-    #         return  # Attendre que l'agent ait une position définie et que les données LiDAR soient disponibles
-
-    #     # Récupérer la position de l'agent en indices de carte
-    #     agent_x = int((self.x - self.map_msg.info.origin.position.x) / self.map_msg.info.resolution)
-    #     agent_y = self.map_msg.info.height - int((self.y - self.map_msg.info.origin.position.y) / self.map_msg.info.resolution)
-
-    #     # Vérifier si la position de l'agent est dans les limites
-    #     if 0 <= agent_x < self.map_msg.info.width and 0 <= agent_y < self.map_msg.info.height:
-    #         self.map[agent_y, agent_x] = FREE_SPACE_VALUE  # Marquer la position de l'agent en blanc
-
-    #     # Parcourir les données LiDAR
-    #     """VERSION 1"""
-    #     for i, distance in enumerate(self.lidar_data.ranges):
-    #         if self.lidar_data.range_min < distance < self.lidar_data.range_max:  
-    #             angle = self.lidar_data.angle_min + i * self.lidar_data.angle_increment
-
-    #             # Calculer la position en absolu
-    #             x_offset = distance * np.cos(angle + self.yaw)
-    #             y_offset = distance * np.sin(angle + self.yaw)
-
-    #             # Convertir en indices de carte
-    #             map_x = int((self.x + x_offset - self.map_msg.info.origin.position.x) / self.map_msg.info.resolution)
-    #             map_y = self.map_msg.info.height - int((self.y + y_offset - self.map_msg.info.origin.position.y) / self.map_msg.info.resolution)
-
-    #             # Vérifier si c'est un autre agent au lieu d'un obstacle
-    #             for agent_x, agent_y in self.agents_pose:
-    #                 if agent_x is not None and agent_y is not None:
-    #                     agent_map_x = int((agent_x - self.map_msg.info.origin.position.x) / self.map_msg.info.resolution)
-    #                     agent_map_y = self.map_msg.info.height - int((agent_y - self.map_msg.info.origin.position.y) / self.map_msg.info.resolution)
-
-    #                     if abs(map_x - agent_map_x) <= 1 and abs(map_y - agent_map_y) <= 1:
-    #                         self.map[map_y, map_x] = OTHER_AGENT_VALUE  # Marquer en tant que robot
-    #                         break  # On sort de la boucle, pas besoin de chercher plus loin
-
-    #             else:  # Si ce n'est pas un autre agent, alors c'est un obstacle
-    #                 if 0 <= map_x < self.map_msg.info.width and 0 <= map_y < self.map_msg.info.height:
-    #                     self.map[map_y, map_x] = OBSTACLE_VALUE  # Marquer en noir
-
-    #     # Publier la carte mise à jour
-    #     self.publish_maps()
 
     """VERSION 2"""
     def map_update(self):
@@ -203,8 +157,8 @@ class Agent(Node):
         agent_y = self.map_msg.info.height - int((self.y - self.map_msg.info.origin.position.y) / self.map_msg.info.resolution) -1
 
         # Vérifier si la position de l'agent est dans les limites
-        if 0 <= agent_x < self.map_msg.info.width and 0 <= agent_y < self.map_msg.info.height:
-            self.map[agent_y, agent_x] = PATH_VALUE  # Marquer la position du robot
+        # if 0 <= agent_x < self.map_msg.info.width and 0 <= agent_y < self.map_msg.info.height:
+        #     self.map[agent_y, agent_x] = PATH_VALUE  # Marquer la position du robot
 
         # Parcourir les données LiDAR
         for i, distance in enumerate(self.lidar_data.ranges):
