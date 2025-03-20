@@ -206,6 +206,7 @@ class Agent(Node):
 
         # Publier la carte mise à jour
         self.publish_maps()
+        # Test
 
     
 
