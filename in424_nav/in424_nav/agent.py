@@ -7,6 +7,8 @@ __version__ = "1.0.0"
 
 import rclpy
 from rclpy.node import Node
+import heapq
+import math
 from nav_msgs.msg import Odometry, OccupancyGrid
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
@@ -229,8 +231,156 @@ class Agent(Node):
 
 
     def strategy(self):
-        """ Decision and action layers """
-        pass
+        """Decision and action layers with A* pathfinding"""
+        if self.x is None or self.y is None or not hasattr (self, 'map'):
+            return
+        goal = self.find_nearest_unexplored()
+        if goal is None :
+            self.get_logger().info("Toute la carte a été explorée !")
+            self.stop_robot()
+            return 
+        start = self.world_to_map(self.x,self.y)
+
+        path = self.a_star_search(start,goal)
+
+        if path and len(path) > 1 :
+            next_cell = path[1]
+            next_pos = self.map_to_world(next_cell[0],next_cell[1])
+            self.move_to_postion(next_pos)
+        else :
+            self.stop_robot()
+    def find_nearest_unexplored(self) :
+        """Trouver la cellule inexplorée la plus proche"""
+        agent_x, agent_y = self.world_to_map(self.x,self.y)
+        closest = None 
+        min_dist = float('inf')
+        for y in range(self.h):
+            for x in range (self.w):
+                if self.map[x,y] == UNEXPLORED_SPACE_VALUE :
+                    dist = (x-agent_x)**2 + (y-agent_y)**2
+                    if dist < min_dist :
+                        min_dist = dist 
+                        closest = (x,y)
+        return closest
+    
+    def a_star_search(self, start, goal):
+            """ Implémentation de l'algorithme A* """
+            open_set = []
+            heapq.heappush(open_set, (0, start))
+        
+            came_from = {}
+            g_score = {start: 0}
+            f_score = {start: self.heuristic(start, goal)}
+        
+            open_set_hash = {start}
+        
+            while open_set:
+                current = heapq.heappop(open_set)[1]
+                open_set_hash.remove(current)
+            
+            if current == goal:
+                return self.reconstruct_path(came_from, current)
+            
+            for dx, dy in [(0,1), (1,0), (0,-1), (-1,0), (1,1), (-1,-1), (1,-1), (-1,1)]:
+                neighbor = (current[0] + dx, current[1] + dy)
+                
+                # Vérifier si le voisin est valide
+                if not (0 <= neighbor[0] < self.w and 0 <= neighbor[1] < self.h):
+                    continue
+                
+                # Vérifier si c'est un obstacle
+                if self.map[neighbor[1], neighbor[0]] == OBSTACLE_VALUE:
+                    continue
+                
+                # Coût de déplacement (1 pour orthogonal, sqrt(2) pour diagonal)
+                move_cost = 1 if dx == 0 or dy == 0 else math.sqrt(2)
+                tentative_g_score = g_score[current] + move_cost
+                
+                if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g_score
+                    f_score[neighbor] = tentative_g_score + self.heuristic(neighbor, goal)
+                    if neighbor not in open_set_hash:
+                        heapq.heappush(open_set, (f_score[neighbor], neighbor))
+                        open_set_hash.add(neighbor)
+        
+            return None  # Pas de chemin trouvé
+
+    def heuristic(self, a, b):
+        """ Distance heuristique (Euclidienne) """
+        return math.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2)
+
+    def reconstruct_path(self, came_from, current):
+        """ Reconstruit le chemin à partir des données de came_from """
+        path = [current]
+        while current in came_from:
+            current = came_from[current]
+            path.append(current)
+        path.reverse()
+        return path
+
+    def world_to_map(self, world_x, world_y):
+        """ Convertit les coordonnées du monde en coordonnées de la grille """
+        map_x = int((world_x - self.map_msg.info.origin.position.x) / self.map_msg.info.resolution)
+        map_y = self.map_msg.info.height - int((world_y - self.map_msg.info.origin.position.y) / self.map_msg.info.resolution) - 1
+        return (map_x, map_y)
+
+    def map_to_world(self, map_x, map_y):
+        """ Convertit les coordonnées de la grille en coordonnées du monde """
+        world_x = self.map_msg.info.origin.position.x + (map_x + 0.5) * self.map_msg.info.resolution
+        world_y = self.map_msg.info.origin.position.y + ((self.map_msg.info.height - map_y - 0.5) * self.map_msg.info.resolution)
+        return (world_x, world_y)
+
+    def move_to_position(self, target_pos):
+        """ Envoie les commandes de mouvement pour atteindre la position cible """
+        cmd = Twist()
+        
+        # Calculer la différence de position
+        dx = target_pos[0] - self.x
+        dy = target_pos[1] - self.y
+        
+        # Calculer la distance et l'angle vers la cible
+        distance = math.sqrt(dx**2 + dy**2)
+        target_yaw = math.atan2(dy, dx)
+        
+        # Calculer la différence d'angle
+        angle_diff = self.normalize_angle(target_yaw - self.yaw)
+        
+        # Seuil pour considérer que l'orientation est correcte
+        angle_threshold = 0.1
+        distance_threshold = self.robot_size * 0.5
+        
+        if distance > distance_threshold:
+            if abs(angle_diff) > angle_threshold:
+                # Rotation vers la cible
+                cmd.angular.z = 0.3 * angle_diff
+            else:
+                # Avancer vers la cible
+                cmd.linear.x = 0.2 * min(distance, 1.0)
+        else:
+            # Arrêter le robot
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+        
+        self.cmd_vel_pub.publish(cmd)
+
+    def stop_robot(self):
+        """ Arrête le robot """
+        cmd = Twist()
+        cmd.linear.x = 0.0
+        cmd.angular.z = 0.0
+        self.cmd_vel_pub.publish(cmd)
+
+    def normalize_angle(self, angle):
+        """ Normalise l'angle entre -pi et pi """
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+
+
+
 
 
 
