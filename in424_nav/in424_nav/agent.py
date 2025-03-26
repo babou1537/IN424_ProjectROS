@@ -151,7 +151,7 @@ class Agent(Node):
             self.x, self.y = x, y
             self.yaw = euler_from_quaternion([msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.z, msg.pose.pose.orientation.w])[2]
         self.agents_pose[2] = (x, y)
-        # self.get_logger().info(f"Agent 3: ({x:.2f}, {y:.2f})")
+        self.get_logger().info(f"Agent 3: ({x:.2f}, {y:.2f})")
 
 
     """VERSION 2"""
@@ -214,7 +214,7 @@ class Agent(Node):
 
         # Publier la carte mise à jour
         self.publish_maps()
-        # Test
+
 
     
     def lidar_cb(self, msg):
