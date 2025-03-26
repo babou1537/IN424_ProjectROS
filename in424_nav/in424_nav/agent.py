@@ -348,7 +348,7 @@ class Agent(Node):
         
         # Seuil pour considérer que l'orientation est correcte
         angle_threshold = 0.1
-        distance_threshold = self.robot_size * 0.5
+        distance_threshold = self.robot_size * 1.0
         
         if distance > distance_threshold:
             if abs(angle_diff) > angle_threshold:
