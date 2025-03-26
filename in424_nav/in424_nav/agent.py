@@ -7,6 +7,8 @@ __version__ = "1.0.0"
 
 import rclpy
 from rclpy.node import Node
+from std_msgs.msg import Int32MultiArray, String
+
 from nav_msgs.msg import Odometry, OccupancyGrid
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
@@ -14,6 +16,8 @@ from rclpy.qos import qos_profile_sensor_data
 from tf_transformations import euler_from_quaternion
 
 import numpy as np
+from collections import deque #Gestion de liste
+import json
 
 from .my_common import *    #common variables are stored here
 
@@ -31,7 +35,25 @@ class Agent(Node):
         #initialize attributes
         self.agents_pose = [None]*self.nb_agents    #[(x_1, y_1), (x_2, y_2), (x_3, y_3)] if there are 3 agents
         self.x = self.y = self.yaw = None   #the pose of this specific agent running the node
+        self.last_positions = deque(maxlen=5)
 
+        self.nav_params = {
+        'target_refresh_rate': 1.0,  # Fréquence de rafraîchissement des cibles (en secondes)
+        'linear_speed': 2,         # Vitesse linéaire max (m/s)
+        'angular_speed': 2,        # Vitesse angulaire max (rad/s)
+        'arrival_threshold': 0.3,    # Distance pour considérer la cible atteinte (mètres)
+        'progress_threshold': 0.5    # Distance minimale de progression (mètres)
+        }
+
+        self.frontier_weights = {
+            'distance': 0.4,       # Poids de la distance
+            'size': 0.35,          # Poids de la taille
+            'accessibility': 0.25, # Poids de l'accessibilité
+            'max_distance': 20,    # Distance max normalisée (en cellules)
+            'depth_penalty': 0.8   # Coefficient de pénalité en profondeur
+        }
+
+        # Cartographie
         self.map_agent_pub = self.create_publisher(OccupancyGrid, f"/{self.ns}/map", 1) #publisher for agent's own map
         self.init_map()
 
@@ -46,18 +68,24 @@ class Agent(Node):
         self.create_subscription(LaserScan, f"{self.ns}/laser/scan", self.lidar_cb, qos_profile=qos_profile_sensor_data) #subscribe to the agent's own LIDAR topic
         self.cmd_vel_pub = self.create_publisher(Twist, f"{self.ns}/cmd_vel", 1)    #publisher to send velocity commands to the robot
 
-        self.assigned_frontier = None
-        self.frontier_update_timer = self.create_timer(2.0, self.update_frontiers)
-
-        """A TESTER"""
-        # self.frontier_pub = self.create_publisher(FrontierArray, '/frontiers', 10)
-        # self.frontier_sub = self.create_subscription(FrontierArray, '/frontiers', self.frontier_cb, 10)
-
+        # Système de frontières (version optimisée)
+        self.assigned_frontier = None  # Un seul attribut pour la cible actuelle
+        self.shared_frontiers = {}  # { (x,y): robot_id } - remplace reserved_frontiers et known_frontiers
+        self.target_lock_duration = 5.0  # Durée de réservation
+        
+        # Communication des frontières
+        self.frontier_pub = self.create_publisher(Int32MultiArray, '/shared_frontiers', 10)
+        self.id_pub = self.create_publisher(String, '/frontier_owners', 10)
+        self.create_subscription(Int32MultiArray, '/shared_frontiers', self.frontiers_cb, 10)
+        self.create_subscription(String, '/frontier_owners', self.owners_cb, 10)
 
         #Create timers to autonomously call the following methods periodically
-        self.create_timer(0.2, self.map_update) #0.2s of period <=> 5 Hz
-        self.create_timer(0.5, self.strategy)      #0.5s of period <=> 2 Hz
+        self.create_timer(0.3, self.map_update) #0.2s of period <=> 5 Hz
+        self.create_timer(1.0, self.update_frontiers)  # ~3Hz
+        self.create_timer(0.1, self.navigation_loop)
+        self.create_timer(0.5, self.strategy)        #0.5s of period <=> 2 Hz
         self.create_timer(0.5, self.publish_maps) #1Hz
+        
     
 
     def load_params(self):
@@ -104,7 +132,7 @@ class Agent(Node):
         for i in range(self.h):
             for j in range(self.w):
                 # if (self.map[i, j] == UNEXPLORED_SPACE_VALUE) and (received_map[i, j] != UNEXPLORED_SPACE_VALUE):
-                if (received_map[i, j] != UNEXPLORED_SPACE_VALUE) and ((self.map[i, j] == UNEXPLORED_SPACE_VALUE) or (self.map[i, j] == FREE_SPACE_VALUE)):
+                if (received_map[i, j] != UNEXPLORED_SPACE_VALUE) and ((self.map[i, j] == UNEXPLORED_SPACE_VALUE) or (self.map[i, j] == FREE_SPACE_VALUE) or (self.map[i,j] == FRONTIER_VALUE)):
                     self.map[i, j] = received_map[i, j]
 
 
@@ -151,7 +179,7 @@ class Agent(Node):
             self.x, self.y = x, y
             self.yaw = euler_from_quaternion([msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.z, msg.pose.pose.orientation.w])[2]
         self.agents_pose[2] = (x, y)
-        self.get_logger().info(f"Agent 3: ({x:.2f}, {y:.2f})")
+        # self.get_logger().info(f"Agent 3: ({x:.2f}, {y:.2f})")
 
 
     """VERSION 2"""
@@ -236,229 +264,335 @@ class Agent(Node):
 
 
     def strategy(self):
-        """Decision and action layers"""
-        if not hasattr(self, 'map') or self.x is None or self.y is None:
+        """Decision layer unifié"""
+        if not hasattr(self, 'map') or self.x is None:
             return
         
-        # Si cet agent a une frontière assignée, ne rien faire (la navigation est gérée par update_frontiers)
+        # Si déjà une target, laisser update_frontiers gérer
         if self.assigned_frontier:
             return
         
-        # Sinon, explorer aléatoirement ou attendre une nouvelle assignation
+        # Comportement par défaut
         cmd_vel = Twist()
-        cmd_vel.linear.x = 0.1
-        cmd_vel.angular.z = 0.2 if np.random.rand() > 0.5 else -0.2
+        
+        # Éviter les obstacles (à améliorer)
+        if hasattr(self, 'lidar_data'):
+            front_obstacle = any(0 < d < 0.5 for d in self.lidar_data.ranges[:30]+self.lidar_data.ranges[-30:])
+            if front_obstacle:
+                cmd_vel.angular.z = 0.7
+            else:
+                cmd_vel.linear.x = 0.2
+        
         self.cmd_vel_pub.publish(cmd_vel)
+
+
+    def world_to_map(self, world_x, world_y):
+        """Conversion optimisée world coordinates -> map indices"""
+        map_x = int((world_x - self.map_msg.info.origin.position.x) / self.map_msg.info.resolution)
+        map_y = self.map_msg.info.height - int((world_y - self.map_msg.info.origin.position.y) / self.map_msg.info.resolution)
+        return map_x, map_y
+
+    def is_leader(self):
+        """Détermine si cet agent est le leader"""
+        return int(self.ns[-1]) == 1 and self.nb_agents > 1
 
     # def evaluate_frontier(self, frontier):
     #     """
-    #     Évalue une frontière en fonction de plusieurs critères :
-    #     - Taille de la frontière
-    #     - Gain d'information
-    #     - Accessibilité
+    #     Évalue une frontière selon plusieurs critères
+    #     :param frontier: Tuple (i,j) des coordonnées de la frontière
+    #     :return: Score numérique (plus élevé = meilleure frontière)
     #     """
     #     i, j = frontier
-
-    #     # Calcul de la taille de la frontière
-    #     size = self.calculate_frontier_size(i, j)
-
-    #     # Gain d'information : plus une frontière est proche d'une zone non explorée, plus elle est intéressante
-    #     info_gain = self.calculate_information_gain(i, j)
-
-    #     # Accessibilité : plus une frontière est proche d'un agent ou moins entourée d'obstacles, plus elle est accessible
-    #     accessibility = self.calculate_accessibility(i, j)
-
-    #     # Pondération des critères (ajustez les poids en fonction des priorités)
-    #     score = (size * 0.3) + (info_gain * 0.4) + (accessibility * 0.3)
-
+        
+    #     # 1. Distance par rapport à l'agent actuel
+    #     agent_x = int((self.x - self.map_msg.info.origin.position.x) / self.map_msg.info.resolution)
+    #     agent_y = self.h - int((self.y - self.map_msg.info.origin.position.y) / self.map_msg.info.resolution)
+    #     distance = np.sqrt((i - agent_x)**2 + (j - agent_y)**2)
+        
+    #     # 2. Taille de la zone frontière (nombre de cellules inexplorées adjacentes)
+    #     frontier_size = 0
+    #     for di, dj in [(-1,0),(1,0),(0,-1),(0,1)]:
+    #         if 0 <= i+di < self.h and 0 <= j+dj < self.w:
+    #             if self.map[i+di,j+dj] == UNEXPLORED_SPACE_VALUE:
+    #                 frontier_size += 1
+        
+    #     # 3. Accessibilité (absence d'obstacles proches)
+    #     accessibility = 1.0
+    #     for di, dj in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(1,1),(-1,1),(1,-1)]:
+    #         if 0 <= i+di < self.h and 0 <= j+dj < self.w:
+    #             if self.map[i+di,j+dj] == OBSTACLE_VALUE:
+    #                 accessibility *= 0.8  # Réduction pour chaque obstacle proche
+        
+    #     # Pondération des facteurs
+    #     score = (1.0 / (distance + 0.1)) * 0.4 + frontier_size * 0.3 + accessibility * 0.3
     #     return score
+    def evaluate_frontier(self, frontier):
+        """
+        Version améliorée du scoring qui:
+        1. Favorise les frontières lointaines
+        2. Pèse mieux la taille des zones inconnues
+        3. Pénalise fortement les zones enclavées
+        """
+        i, j = frontier
+        
+        # 1. Distance (40% du score)
+        agent_x, agent_y = self.world_to_map(self.x, self.y)
+        distance = np.sqrt((i - agent_x)**2 + (j - agent_y)**2)
+        norm_distance = min(distance / self.frontier_weights['max_distance'], 1.0)  # Normalisé [0-1] avec cap à 20 cellules
+        
+        # 2. Taille de la frontière (35% du score)
+        frontier_size = 0
+        unexplored_directions = []
+        
+        for di, dj in [(-1,0),(1,0),(0,-1),(0,1)]:
+            ni, nj = i+di, j+dj
+            if 0 <= ni < self.h and 0 <= nj < self.w:
+                if self.map[ni,nj] == UNEXPLORED_SPACE_VALUE:
+                    frontier_size += 1
+                    unexplored_directions.append((di,dj))
+        
+        # Bonus pour les grandes zones contiguës
+        contiguous_bonus = 1.0 + 0.2 * len(unexplored_directions)
+        norm_size = min(frontier_size / 4, 1.0) * contiguous_bonus  # Normalisé [0-1.2]
 
-    # def calculate_frontier_size(self, i, j):
-    #     """
-    #     Calcule la taille de la frontière en comptant le nombre de cellules adjacentes marquées comme FREE_SPACE.
-    #     """
-    #     size = 0
-    #     directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]  # Haut, Bas, Gauche, Droite
-    #     for di, dj in directions:
-    #         ni, nj = i + di, j + dj
-    #         if 0 <= ni < self.map.shape[0] and 0 <= nj < self.map.shape[1]:
-    #             if self.map[ni, nj] == FREE_SPACE_VALUE:
-    #                 size += 1
-    #     return size
+        # 3. Accessibilité (25% du score)
+        obstacle_count = sum(
+            1 for di, dj in [(-1,-1),(1,1),(-1,1),(1,-1)]
+            if 0 <= i+di < self.h and 0 <= j+dj < self.w
+            and self.map[i+di,j+dj] == OBSTACLE_VALUE
+        )
+        
+        # Pénalité exponentielle pour les zones enclavées
+        accessibility = max(0.1, 1.0 - 0.3**obstacle_count)  # Entre 0.1 et 1.0
 
-    # def calculate_information_gain(self, i, j):
-    #     """
-    #     Calcule le gain d'information en fonction de la proximité d'une zone UNEXPLORED_SPACE.
-    #     Plus la zone adjacente est grande, plus le gain d'information est élevé.
-    #     """
-    #     directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-    #     info_gain = 0
-    #     for di, dj in directions:
-    #         ni, nj = i + di, j + dj
-    #         if 0 <= ni < self.map.shape[0] and 0 <= nj < self.map.shape[1]:
-    #             if self.map[ni, nj] == UNEXPLORED_SPACE_VALUE:
-    #                 info_gain += 1
-    #     return info_gain
+        # 4. Facteur de profondeur (nouveau)
+        depth_factor = 1.0
+        for di, dj in unexplored_directions:
+            for step in range(1, 5):  # Regarde 4 cases plus loin
+                ni, nj = i + di*step, j + dj*step
+                if 0 <= ni < self.h and 0 <= nj < self.w:
+                    if self.map[ni,nj] == OBSTACLE_VALUE:
+                        depth_factor *= self.frontier_weights['depth_penalty']
+                        break
 
-    # def calculate_accessibility(self, i, j):
+        # Score final pondéré
+        score = (
+            norm_distance * self.frontier_weights['distance'] +
+            norm_size * self.frontier_weights['size'] + 
+            accessibility * self.frontier_weights['accessibility']
+        ) * depth_factor
 
-    #     if not hasattr(self, 'agents_pose') or not self.agents_pose:
-    #         return 0  # Si on n'a pas d'info sur les agents, accessibilité nulle
+        return score
 
-    #     min_distance = float('inf')
 
-    #     for agent_x, agent_y in self.agents_pose:
-    #             if agent_x is not None and agent_y is not None:
-    #                 distance = np.sqrt((i - agent_x)**2 + (j - agent_y)**2)
-    #                 min_distance = min(min_distance, distance)
-
-    #         # Normalisation de la distance (plus proche = plus accessible)
-    #     max_dist = max(self.map.shape)  # Distance max possible
-    #     accessibility = 1 - (min_distance / max_dist)
-
-    #         # Vérification des obstacles autour
-    #     obstacle_penalty = 0
-    #     directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-    #     for di, dj in directions:
-    #             ni, nj = i + di, j + dj
-    #             if 0 <= ni < self.map.shape[0] and 0 <= nj < self.map.shape[1]:
-    #                 if self.map[ni, nj] == OBSTACLE_VALUE:
-    #                     obstacle_penalty += 0.2  # Chaque obstacle réduit l'accessibilité
-
-    #     accessibility = max(0, accessibility - obstacle_penalty)
-
-    #     return accessibility
-
-    # def allocate_frontiers(self):
-    #     """
-    #     Alloue les frontières aux agents en fonction des scores calculés par evaluate_frontier.
-    #     """
-    #     frontiers_with_scores = []
-    #     # Exemple de boucle pour détecter les frontières
-    #     for i in range(self.map.shape[0]):
-    #         for j in range(self.map.shape[1]):
-    #             """
-    #             if self.map[i, j] == FRONTIER_VALUE:
-    #             """
+    # def detect_frontiers(self):
+    #     """Détecte toutes les cellules frontières dans la carte"""
+    #     frontiers = []
+    #     for i in range(1, self.map.shape[0]-1):
+    #         for j in range(1, self.map.shape[1]-1):
     #             if self.map[i, j] == FREE_SPACE_VALUE and any(
-    #             0 <= i+di < self.map.shape[0] and 0 <= j+dj < self.map.shape[1] and 
-    #             self.map[i+di, j+dj] == UNEXPLORED_SPACE_VALUE
-    #             for di, dj in [(-1, 0), (1, 0), (0, -1), (0, 1)]):
-
-    #                 score = self.evaluate_frontier((i, j))
-    #                 frontiers_with_scores.append((score, (i, j)))
-
-    #     # Trier les frontières par score décroissant
-    #     frontiers_with_scores.sort(reverse=True, key=lambda x: x[0])
-
-    #     # Attribuer les meilleures frontières aux agents
-    #     for idx, (score, frontier) in enumerate(frontiers_with_scores[:self.nb_agents]):
-    #         agent_idx = idx % self.nb_agents  # Assigner les frontières de manière circulaire aux agents
-    #         self.assign_frontier_to_agent(agent_idx, frontier)
-
-    # def assign_frontier_to_agent(self, agent_idx, frontier):
-    #     """
-    #     Assigne une frontière à un agent donné. 
-    #     Ajoutez ici la logique de déplacement de l'agent vers la frontière.
-    #     """
-    #     agent_pos = self.agents_pose[agent_idx]
-    #     if agent_pos is not None:
-    #         agent_x, agent_y = agent_pos
-    #         # Vous pouvez ici implémenter la logique pour envoyer l'agent à la frontière
-    #         self.get_logger().info(f"Agent {agent_idx + 1} assigned to frontier at ({frontier[0]}, {frontier[1]})")
-
-
-    def update_frontiers(self):
-        """Détecte et met à jour les frontières périodiquement"""
-        if not hasattr(self, 'map') or self.x is None or self.y is None:
-            return
-        
-        # Convertir la position actuelle en coordonnées de carte
-        agent_x = int((self.x - self.map_msg.info.origin.position.x) / self.map_msg.info.resolution)
-        agent_y = self.map_msg.info.height - int((self.y - self.map_msg.info.origin.position.y) / self.map_msg.info.resolution)
-        
-        # Détecter les frontières
-        frontiers = self.detect_frontiers()
-        
-        # Si c'est le premier agent, allouer les frontières
-        if int(self.ns[-1]) == 1 and self.nb_agents > 1:
-            self.allocate_frontiers(frontiers)
-        
-        # Si cet agent a une frontière assignée, naviguer vers elle
-        if self.assigned_frontier:
-            self.navigate_to_frontier(agent_x, agent_y)
-
+    #                 self.map[i+di, j+dj] == UNEXPLORED_SPACE_VALUE
+    #                 for di, dj in [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    #             ):
+    #                 frontiers.append((i, j))
+    #                 #self.map[i, j] = FRONTIER_VALUE  # Optionnel: marquer visuellement
+    #     return frontiers
 
     def detect_frontiers(self):
-        """Détecte toutes les cellules frontières dans la carte"""
+        """Détecte uniquement les cellules frontières externes (bord entre connu/inconnu)"""
         frontiers = []
-        for i in range(1, self.map.shape[0]-1):
-            for j in range(1, self.map.shape[1]-1):
-                if self.map[i, j] == FREE_SPACE_VALUE and any(
-                    self.map[i+di, j+dj] == UNEXPLORED_SPACE_VALUE
-                    for di, dj in [(-1, 0), (1, 0), (0, -1), (0, 1)]
-                ):
-                    frontiers.append((i, j))
-                    self.map[i, j] = FRONTIER_VALUE  # Optionnel: marquer visuellement
+        for i in range(1, self.h-1):
+            for j in range(1, self.w-1):
+                # Doit être espace libre ET avoir du vide adjacent
+                if self.map[i,j] == FREE_SPACE_VALUE:
+                    # Vérifie les 8 directions pour du vide
+                    has_unknown = any(
+                        self.map[i+di,j+dj] == UNEXPLORED_SPACE_VALUE
+                        for di,dj in [(-1,-1), (-1,0), (-1,1), (0,-1), 
+                                    (0,1), (1,-1), (1,0), (1,1)]
+                        if 0 <= i+di < self.h and 0 <= j+dj < self.w
+                    )
+                    if has_unknown:
+                        frontiers.append((i,j))
+                        self.map[i, j] = FRONTIER_VALUE
         return frontiers
 
 
-    def navigate_to_frontier(self, current_x, current_y):
-        """Navigue vers la frontière assignée (implémentation basique)"""
-        frontier_x, frontier_y = self.assigned_frontier
+    def publish_frontiers(self, frontiers):
+        """Publie les frontières et leur assignation"""
+        # Message des positions
+        pos_msg = Int32MultiArray()
+        pos_msg.data = [coord for frontier in frontiers for coord in frontier]
+        self.frontier_pub.publish(pos_msg)
         
-        # Calculer la direction vers la frontière
-        dx = frontier_x - current_x
-        dy = frontier_y - current_y
-        
-        # Créer et publier une commande de vitesse
-        cmd_vel = Twist()
-        
-        # Contrôle simple (vous pourriez utiliser un contrôleur PID ou un pathfinding ici)
-        if abs(dx) > abs(dy):
-            cmd_vel.linear.x = 0.1 if dx > 0 else -0.1
-        else:
-            cmd_vel.linear.y = 0.1 if dy > 0 else -0.1
-        
-        self.cmd_vel_pub.publish(cmd_vel)
-        
-        # Si on est proche de la frontière, la considérer comme atteinte
-        if abs(dx) < 2 and abs(dy) < 2:
-            self.get_logger().info(f"Agent {self.ns} reached frontier at {self.assigned_frontier}")
-            self.assigned_frontier = None
+        # Message des propriétaires (JSON)
+        assign_msg = String()
+        assign_msg.data = json.dumps({self.ns: frontiers})
+        self.id_pub.publish(assign_msg)
+
+    def frontiers_cb(self, msg):
+        """Reçoit les positions des frontières"""
+        frontiers = [(msg.data[i], msg.data[i+1]) for i in range(0, len(msg.data), 2)]
+        self.known_frontiers = frontiers  # Mise à jour de la liste globale
+
+    def owners_cb(self, msg):
+        """Reçoit les assignations des frontières"""
+        try:
+            assignments = json.loads(msg.data)
+            for robot_id, frontiers in assignments.items():
+                for frontier in frontiers:
+                    self.shared_frontiers[tuple(frontier)] = robot_id
+        except json.JSONDecodeError as e:
+            self.get_logger().warn(f"Erreur décodage JSON: {str(e)}")
+
 
     def allocate_frontiers(self, frontiers):
-        """Alloue les frontières aux agents en fonction des scores"""
-        if not frontiers or not hasattr(self, 'agents_pose'):
+        """Version corrigée avec déclenchement de la navigation"""
+        if not frontiers:
+            return None
+
+        available = [
+            (self.evaluate_frontier(f), f) 
+            for f in frontiers
+            if not self.check_frontier_conflict(f)
+        ]
+
+        if not available:
+            return None
+
+        available.sort(reverse=True, key=lambda x: x[0])
+        best_score, best_frontier = available[0]
+        
+        # Conversion en coordonnées monde
+        world_x = best_frontier[0] * self.map_msg.info.resolution + self.map_msg.info.origin.position.x
+        world_y = (self.map_msg.info.height - best_frontier[1]) * self.map_msg.info.resolution + self.map_msg.info.origin.position.y
+        
+        self.assigned_frontier = (world_x, world_y)  # Stocke en coordonnées monde
+        self.publish_frontiers([best_frontier])
+        
+        # Déclenche immédiatement la navigation
+        self.navigate_to_frontier()
+        
+        self.get_logger().info(
+            f"Nouvelle cible: ({world_x:.2f}, {world_y:.2f}) | Score: {best_score:.2f}",
+            throttle_duration_sec=1.0
+        )
+        return best_frontier
+    
+    def check_frontier_conflict(self, frontier):
+        """Vérifie si une frontière est déjà prise"""
+        return (tuple(frontier) in self.shared_frontiers and 
+                self.shared_frontiers[tuple(frontier)] != self.ns)
+
+
+    """======= NAVIGATION ENTRE ROBOT =============="""
+    def navigate_to_frontier(self):
+        """Navigation en coordonnées monde avec contrôle PID"""
+        if not self.assigned_frontier or None in (self.x, self.y, self.yaw):
+            return
+
+        target_x, target_y = self.assigned_frontier
+        dx = target_x - self.x
+        dy = target_y - self.y
+        distance = np.hypot(dx, dy)
+
+        # Seuil d'arrivée (en mètres)
+        if distance < 0.3:  # ~3 cellules
+            self.get_logger().info("Cible atteinte!")
+            self.assigned_frontier = None
+            return
+
+        # Calcul de l'angle cible
+        target_yaw = np.arctan2(dy, dx)
+        yaw_error = (target_yaw - self.yaw + np.pi) % (2 * np.pi) - np.pi  # Normalisation [-π, π]
+
+        cmd_vel = Twist()
+        
+        # Contrôle angulaire
+        if abs(yaw_error) > 0.2:  # Seuil de précision (rad)
+            cmd_vel.angular.z = 0.5 * np.clip(yaw_error, -1, 1)
+        else:
+            # Contrôle linéaire
+            cmd_vel.linear.x = 0.2 * min(1.0, distance)
+
+        self.cmd_vel_pub.publish(cmd_vel)
+
+
+    def navigation_loop(self):
+        """Boucle de navigation à haute fréquence"""
+        if self.assigned_frontier:
+            self.navigate_to_frontier()
+        else:
+            # Comportement par défaut quand aucune cible
+            cmd_vel = Twist()
+            cmd_vel.linear.x = 0.1
+            cmd_vel.angular.z = 0.3 if np.random.rand() > 0.5 else -0.3
+            self.cmd_vel_pub.publish(cmd_vel)
+
+
+    def is_target_reached(self):
+        """Vérifie si la target actuelle est atteinte"""
+        if not self.assigned_frontier:
+            return False
+            
+        current_x, current_y = self.world_to_map(self.x, self.y)
+        target_x, target_y = self.assigned_frontier
+        
+        return (abs(current_x - target_x) < 2 and 
+                abs(current_y - target_y) < 2)
+
+    def is_making_progress(self):
+        """Vérifie la progression vers la target actuelle"""
+        if not hasattr(self, 'last_positions'):
+            self.last_positions = deque(maxlen=5)
+        
+        current_pos = self.world_to_map(self.x, self.y)
+        self.last_positions.append(current_pos)
+        
+        if len(self.last_positions) < 5:
+            return True
+        
+        old_x, old_y = self.last_positions[0]
+        current_x, current_y = current_pos
+        distance = np.sqrt((current_x-old_x)**2 + (current_y-old_y)**2)
+        return distance > 2
+    
+    # def update_frontiers(self):
+    #     """Version unifiée avec gestion des targets"""
+    #     frontiers = self.detect_frontiers()
+        
+    #     # Si pas de target ou target atteinte/stale
+    #     if (self.assigned_frontier is None or 
+    #         self.is_target_reached() or
+    #         not self.is_making_progress()):
+            
+    #         self.allocate_frontiers(frontiers)
+        
+    #     # Navigation vers la target
+    #     if self.assigned_frontier:
+    #         self.navigate_to_frontier()
+
+    def update_frontiers(self):
+        """Version optimisée avec gestion fluide des targets"""
+        # Recalcule seulement si le timer est écoulé
+        now = self.get_clock().now()
+        if hasattr(self, 'last_frontier_update'):
+            elapsed = (now - self.last_frontier_update).nanoseconds / 1e9
+            if elapsed < self.nav_params['target_refresh_rate']:
+                return
+        
+        self.last_frontier_update = now
+        
+        frontiers = self.detect_frontiers()
+        if not frontiers:
             return
         
-        # Évaluer toutes les frontières
-        frontiers_with_scores = []
-        for frontier in frontiers:
-            score = self.evaluate_frontier(frontier)
-            frontiers_with_scores.append((score, frontier))
-        
-        # Trier par score décroissant
-        frontiers_with_scores.sort(reverse=True, key=lambda x: x[0])
-        
-        # Assigner aux agents (ici simplifié - en réalité vous voudrez peut-être publier cela)
-        for idx, (score, frontier) in enumerate(frontiers_with_scores[:self.nb_agents]):
-            # Dans une vraie implémentation, vous publieriez cette information aux autres agents
-            if idx == int(self.ns[-1]) - 1:  # Si c'est notre tour
-                self.assigned_frontier = frontier
-                self.get_logger().info(f"Assigned frontier at {frontier} with score {score}")
-
-
-
-
-
-    # A TESTER
-    def frontier_cb(self, msg):
-        """Reçoit les mises à jour des frontières"""
-        # Implémentez la logique pour traiter les frontières partagées
-        pass
-
-
+        # Change de target seulement si nécessaire
+        if (self.assigned_frontier is None 
+            or self.is_target_reached()
+            or not self.is_making_progress()):
+            
+            self.allocate_frontiers(frontiers)
 
 def main():
     rclpy.init()

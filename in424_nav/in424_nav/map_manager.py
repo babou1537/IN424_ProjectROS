@@ -77,9 +77,10 @@ class MapManager(Node):
         received_map = np.flipud(np.array(msg.data).reshape(self.h, self.w))    #convert the received list into a 2D array and reverse rows
         for i in range(self.h):
             for j in range(self.w):
-                if (received_map[i, j] != UNEXPLORED_SPACE_VALUE) and ((self.merged_map[i, j] == UNEXPLORED_SPACE_VALUE) or (self.merged_map[i, j] == FREE_SPACE_VALUE)):
+                if (received_map[i, j] != UNEXPLORED_SPACE_VALUE) and ((self.merged_map[i, j] == UNEXPLORED_SPACE_VALUE) or (self.merged_map[i, j] == FREE_SPACE_VALUE) or (self.merged_map[i,j] == FRONTIER_VALUE)):
                     self.merged_map[i, j] = received_map[i, j]
 
+    
 
     def publish_maps(self):
         """ Publish maps on corresponding topics """
