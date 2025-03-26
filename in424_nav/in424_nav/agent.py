@@ -48,7 +48,7 @@ class Agent(Node):
 
         #Create timers to autonomously call the following methods periodically
         self.create_timer(0.2, self.map_update) #0.2s of period <=> 5 Hz
-        self.create_timer(0.5, self.strategy)      #0.5s of period <=> 2 Hz
+        self.create_timer(0.5, self.allocate_frontiers)      #0.5s of period <=> 2 Hz
         self.create_timer(0.5, self.publish_maps) #1Hz
     
 
@@ -228,10 +228,126 @@ class Agent(Node):
         self.map_agent_pub.publish(self.map_msg)    #publish map to other agents
 
 
-    def strategy(self):
-        """ Decision and action layers """
-        pass
+    # def strategy(self):
+    #     """ Decision and action layers """
+    #     pass
 
+    def evaluate_frontier(self, frontier):
+        """
+        Évalue une frontière en fonction de plusieurs critères :
+        - Taille de la frontière
+        - Gain d'information
+        - Accessibilité
+        """
+        i, j = frontier
+
+        # Calcul de la taille de la frontière
+        size = self.calculate_frontier_size(i, j)
+
+        # Gain d'information : plus une frontière est proche d'une zone non explorée, plus elle est intéressante
+        info_gain = self.calculate_information_gain(i, j)
+
+        # Accessibilité : plus une frontière est proche d'un agent ou moins entourée d'obstacles, plus elle est accessible
+        accessibility = self.calculate_accessibility(i, j)
+
+        # Pondération des critères (ajustez les poids en fonction des priorités)
+        score = (size * 0.3) + (info_gain * 0.4) + (accessibility * 0.3)
+
+        return score
+
+    def calculate_frontier_size(self, i, j):
+        """
+        Calcule la taille de la frontière en comptant le nombre de cellules adjacentes marquées comme FREE_SPACE.
+        """
+        size = 0
+        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]  # Haut, Bas, Gauche, Droite
+        for di, dj in directions:
+            ni, nj = i + di, j + dj
+            if 0 <= ni < self.map.shape[0] and 0 <= nj < self.map.shape[1]:
+                if self.map[ni, nj] == FREE_SPACE_VALUE:
+                    size += 1
+        return size
+
+    def calculate_information_gain(self, i, j):
+        """
+        Calcule le gain d'information en fonction de la proximité d'une zone UNEXPLORED_SPACE.
+        Plus la zone adjacente est grande, plus le gain d'information est élevé.
+        """
+        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        info_gain = 0
+        for di, dj in directions:
+            ni, nj = i + di, j + dj
+            if 0 <= ni < self.map.shape[0] and 0 <= nj < self.map.shape[1]:
+                if self.map[ni, nj] == UNEXPLORED_SPACE_VALUE:
+                    info_gain += 1
+        return info_gain
+
+    def calculate_accessibility(self, i, j):
+
+        if not hasattr(self, 'agents_pose') or not self.agents_pose:
+            return 0  # Si on n'a pas d'info sur les agents, accessibilité nulle
+
+        min_distance = float('inf')
+
+        for agent_x, agent_y in self.agents_pose:
+                if agent_x is not None and agent_y is not None:
+                    distance = np.sqrt((i - agent_x)**2 + (j - agent_y)**2)
+                    min_distance = min(min_distance, distance)
+
+            # Normalisation de la distance (plus proche = plus accessible)
+        max_dist = max(self.map.shape)  # Distance max possible
+        accessibility = 1 - (min_distance / max_dist)
+
+            # Vérification des obstacles autour
+        obstacle_penalty = 0
+        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        for di, dj in directions:
+                ni, nj = i + di, j + dj
+                if 0 <= ni < self.map.shape[0] and 0 <= nj < self.map.shape[1]:
+                    if self.map[ni, nj] == OBSTACLE_VALUE:
+                        obstacle_penalty += 0.2  # Chaque obstacle réduit l'accessibilité
+
+        accessibility = max(0, accessibility - obstacle_penalty)
+
+        return accessibility
+
+    def allocate_frontiers(self):
+        """
+        Alloue les frontières aux agents en fonction des scores calculés par evaluate_frontier.
+        """
+        frontiers_with_scores = []
+        # Exemple de boucle pour détecter les frontières
+        for i in range(self.map.shape[0]):
+            for j in range(self.map.shape[1]):
+                """
+                if self.map[i, j] == FRONTIER_VALUE:
+                """
+                if self.map[i, j] == FREE_SPACE_VALUE and any(
+                0 <= i+di < self.map.shape[0] and 0 <= j+dj < self.map.shape[1] and 
+                self.map[i+di, j+dj] == UNEXPLORED_SPACE_VALUE
+                for di, dj in [(-1, 0), (1, 0), (0, -1), (0, 1)]):
+
+                    score = self.evaluate_frontier((i, j))
+                    frontiers_with_scores.append((score, (i, j)))
+
+        # Trier les frontières par score décroissant
+        frontiers_with_scores.sort(reverse=True, key=lambda x: x[0])
+
+        # Attribuer les meilleures frontières aux agents
+        for idx, (score, frontier) in enumerate(frontiers_with_scores[:self.nb_agents]):
+            agent_idx = idx % self.nb_agents  # Assigner les frontières de manière circulaire aux agents
+            self.assign_frontier_to_agent(agent_idx, frontier)
+
+    def assign_frontier_to_agent(self, agent_idx, frontier):
+        """
+        Assigne une frontière à un agent donné. 
+        Ajoutez ici la logique de déplacement de l'agent vers la frontière.
+        """
+        agent_pos = self.agents_pose[agent_idx]
+        if agent_pos is not None:
+            agent_x, agent_y = agent_pos
+            # Vous pouvez ici implémenter la logique pour envoyer l'agent à la frontière
+            self.get_logger().info(f"Agent {agent_idx + 1} assigned to frontier at ({frontier[0]}, {frontier[1]})")
 
 
 
