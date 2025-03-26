@@ -16,7 +16,7 @@ from tf_transformations import euler_from_quaternion
 import numpy as np
 
 from .my_common import *    #common variables are stored here
-
+#from .map_manager import * 
 
 
 class Agent(Node):
@@ -228,9 +228,36 @@ class Agent(Node):
         self.map_agent_pub.publish(self.map_msg)    #publish map to other agents
 
 
-    def strategy(self):
-        """ Decision and action layers """
-        pass
+    def strategy(allocate_frontiers):
+        def allocate_frontiers(self):
+                """
+                Alloue les frontières aux agents en fonction des scores calculés par evaluate_frontier.
+                """
+                frontiers_with_scores = []
+                # Exemple de boucle pour détecter les frontières
+                for i in range(self.merged_map.shape[0]):
+                    for j in range(self.merged_map.shape[1]):
+                        """
+                        if self.map[i, j] == FRONTIER_VALUE:
+                        """
+                        if self.map[i, j] == FREE_SPACE_VALUE and any(
+                        0 <= i+di < self.merged_map.shape[0] and 0 <= j+dj < self.merged_map.shape[1] and 
+                        self.map[i+di, j+dj] == UNEXPLORED_SPACE_VALUE
+                        for di, dj in [(-1, 0), (1, 0), (0, -1), (0, 1)]):
+
+                            score = self.evaluate_frontier((i, j))
+                            frontiers_with_scores.append((score, (i, j)))
+
+                # Trier les frontières par score décroissant
+                frontiers_with_scores.sort(reverse=True, key=lambda x: x[0])
+
+                # Attribuer les meilleures frontières aux agents
+                for idx, (score, frontier) in enumerate(frontiers_with_scores[:self.nb_agents]):
+                    agent_idx = idx % self.nb_agents  # Assigner les frontières de manière circulaire aux agents
+                    self.assign_frontier_to_agent(agent_idx, frontier)   
+
+
+        
 
 
 

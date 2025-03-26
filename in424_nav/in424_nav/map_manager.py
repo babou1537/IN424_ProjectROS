@@ -11,8 +11,6 @@ from nav_msgs.msg import OccupancyGrid
 import numpy as np
 from .my_common import *    #common variables are stored here
 
-
-
 class MapManager(Node):
     """ This class is used to merge maps from all the agents and display it on RVIZ and for the agents """
     def __init__(self):
@@ -111,7 +109,7 @@ class MapManager(Node):
         directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]  # Haut, Bas, Gauche, Droite
         for di, dj in directions:
             ni, nj = i + di, j + dj
-            if 0 <= ni < self.map.shape[0] and 0 <= nj < self.map.shape[1]:
+            if 0 <= ni < self.merged_map.shape[0] and 0 <= nj < self.merged_map.shape[1]:
                 if self.map[ni, nj] == FREE_SPACE_VALUE:
                     size += 1
         return size
@@ -125,7 +123,7 @@ class MapManager(Node):
         info_gain = 0
         for di, dj in directions:
             ni, nj = i + di, j + dj
-            if 0 <= ni < self.map.shape[0] and 0 <= nj < self.map.shape[1]:
+            if 0 <= ni < self.merged_map.shape[0] and 0 <= nj < self.merged_map.shape[1]:
                 if self.map[ni, nj] == UNEXPLORED_SPACE_VALUE:
                     info_gain += 1
         return info_gain
@@ -143,7 +141,7 @@ class MapManager(Node):
                     min_distance = min(min_distance, distance)
 
             # Normalisation de la distance (plus proche = plus accessible)
-        max_dist = max(self.map.shape)  # Distance max possible
+        max_dist = max(self.merged_map.shape)  # Distance max possible
         accessibility = 1 - (min_distance / max_dist)
 
             # Vérification des obstacles autour
@@ -151,7 +149,7 @@ class MapManager(Node):
         directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
         for di, dj in directions:
                 ni, nj = i + di, j + dj
-                if 0 <= ni < self.map.shape[0] and 0 <= nj < self.map.shape[1]:
+                if 0 <= ni < self.merged_map.shape[0] and 0 <= nj < self.merged_map.shape[1]:
                     if self.map[ni, nj] == OBSTACLE_VALUE:
                         obstacle_penalty += 0.2  # Chaque obstacle réduit l'accessibilité
 
@@ -165,13 +163,13 @@ class MapManager(Node):
         """
         frontiers_with_scores = []
         # Exemple de boucle pour détecter les frontières
-        for i in range(self.map.shape[0]):
-            for j in range(self.map.shape[1]):
+        for i in range(self.merged_map.shape[0]):
+            for j in range(self.merged_map.shape[1]):
                 """
                 if self.map[i, j] == FRONTIER_VALUE:
                 """
                 if self.map[i, j] == FREE_SPACE_VALUE and any(
-                0 <= i+di < self.map.shape[0] and 0 <= j+dj < self.map.shape[1] and 
+                0 <= i+di < self.merged_map.shape[0] and 0 <= j+dj < self.merged_map.shape[1] and 
                 self.map[i+di, j+dj] == UNEXPLORED_SPACE_VALUE
                 for di, dj in [(-1, 0), (1, 0), (0, -1), (0, 1)]):
 
