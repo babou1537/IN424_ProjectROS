@@ -209,7 +209,6 @@ class Agent(Node):
         # Test
 
     
-
     def lidar_cb(self, msg):
         """ 
             @brief Get messages from LIDAR topic.
