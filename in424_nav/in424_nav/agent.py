@@ -39,16 +39,16 @@ class Agent(Node):
 
         self.nav_params = {
         'target_refresh_rate': 1.0,  # Fréquence de rafraîchissement des cibles (en secondes)
-        'linear_speed': 2,         # Vitesse linéaire max (m/s)
-        'angular_speed': 2,        # Vitesse angulaire max (rad/s)
+        'linear_speed': 2,           # Vitesse linéaire max (m/s)
+        'angular_speed': 2,          # Vitesse angulaire max (rad/s)
         'arrival_threshold': 0.3,    # Distance pour considérer la cible atteinte (mètres)
         'progress_threshold': 0.5    # Distance minimale de progression (mètres)
         }
 
         self.frontier_weights = {
-            'distance': 0.4,       # Poids de la distance
-            'size': 0.35,          # Poids de la taille
-            'accessibility': 0.25, # Poids de l'accessibilité
+            'distance': 0.2,       # Poids de la distance
+            'size': 0.6,          # Poids de la taille
+            'accessibility': 0.35, # Poids de l'accessibilité
             'max_distance': 20,    # Distance max normalisée (en cellules)
             'depth_penalty': 0.8   # Coefficient de pénalité en profondeur
         }
@@ -296,36 +296,7 @@ class Agent(Node):
         """Détermine si cet agent est le leader"""
         return int(self.ns[-1]) == 1 and self.nb_agents > 1
 
-    # def evaluate_frontier(self, frontier):
-    #     """
-    #     Évalue une frontière selon plusieurs critères
-    #     :param frontier: Tuple (i,j) des coordonnées de la frontière
-    #     :return: Score numérique (plus élevé = meilleure frontière)
-    #     """
-    #     i, j = frontier
-        
-    #     # 1. Distance par rapport à l'agent actuel
-    #     agent_x = int((self.x - self.map_msg.info.origin.position.x) / self.map_msg.info.resolution)
-    #     agent_y = self.h - int((self.y - self.map_msg.info.origin.position.y) / self.map_msg.info.resolution)
-    #     distance = np.sqrt((i - agent_x)**2 + (j - agent_y)**2)
-        
-    #     # 2. Taille de la zone frontière (nombre de cellules inexplorées adjacentes)
-    #     frontier_size = 0
-    #     for di, dj in [(-1,0),(1,0),(0,-1),(0,1)]:
-    #         if 0 <= i+di < self.h and 0 <= j+dj < self.w:
-    #             if self.map[i+di,j+dj] == UNEXPLORED_SPACE_VALUE:
-    #                 frontier_size += 1
-        
-    #     # 3. Accessibilité (absence d'obstacles proches)
-    #     accessibility = 1.0
-    #     for di, dj in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(1,1),(-1,1),(1,-1)]:
-    #         if 0 <= i+di < self.h and 0 <= j+dj < self.w:
-    #             if self.map[i+di,j+dj] == OBSTACLE_VALUE:
-    #                 accessibility *= 0.8  # Réduction pour chaque obstacle proche
-        
-    #     # Pondération des facteurs
-    #     score = (1.0 / (distance + 0.1)) * 0.4 + frontier_size * 0.3 + accessibility * 0.3
-    #     return score
+
     def evaluate_frontier(self, frontier):
         """
         Version améliorée du scoring qui:
@@ -384,19 +355,6 @@ class Agent(Node):
 
         return score
 
-
-    # def detect_frontiers(self):
-    #     """Détecte toutes les cellules frontières dans la carte"""
-    #     frontiers = []
-    #     for i in range(1, self.map.shape[0]-1):
-    #         for j in range(1, self.map.shape[1]-1):
-    #             if self.map[i, j] == FREE_SPACE_VALUE and any(
-    #                 self.map[i+di, j+dj] == UNEXPLORED_SPACE_VALUE
-    #                 for di, dj in [(-1, 0), (1, 0), (0, -1), (0, 1)]
-    #             ):
-    #                 frontiers.append((i, j))
-    #                 #self.map[i, j] = FRONTIER_VALUE  # Optionnel: marquer visuellement
-    #     return frontiers
 
     def detect_frontiers(self):
         """Détecte uniquement les cellules frontières externes (bord entre connu/inconnu)"""
@@ -495,9 +453,10 @@ class Agent(Node):
         dx = target_x - self.x
         dy = target_y - self.y
         distance = np.hypot(dx, dy)
+        self.get_logger().info(f"Distance : {distance} > 1")
 
         # Seuil d'arrivée (en mètres)
-        if distance < 0.3:  # ~3 cellules
+        if distance < 1:  # ~3 cellules
             self.get_logger().info("Cible atteinte!")
             self.assigned_frontier = None
             return
@@ -557,20 +516,6 @@ class Agent(Node):
         distance = np.sqrt((current_x-old_x)**2 + (current_y-old_y)**2)
         return distance > 2
     
-    # def update_frontiers(self):
-    #     """Version unifiée avec gestion des targets"""
-    #     frontiers = self.detect_frontiers()
-        
-    #     # Si pas de target ou target atteinte/stale
-    #     if (self.assigned_frontier is None or 
-    #         self.is_target_reached() or
-    #         not self.is_making_progress()):
-            
-    #         self.allocate_frontiers(frontiers)
-        
-    #     # Navigation vers la target
-    #     if self.assigned_frontier:
-    #         self.navigate_to_frontier()
 
     def update_frontiers(self):
         """Version optimisée avec gestion fluide des targets"""
