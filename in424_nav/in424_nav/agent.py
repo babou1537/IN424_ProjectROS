@@ -17,7 +17,7 @@ from tf_transformations import euler_from_quaternion
 
 import numpy as np
 from collections import deque #Gestion de liste
-import json
+import json, time
 
 from .my_common import *    #common variables are stored here
 
@@ -48,9 +48,9 @@ class Agent(Node):
         }
 
         self.frontier_weights = {
-            'distance': 0.2,       # Poids de la distance
-            'size': 0.6,          # Poids de la taille
-            'accessibility': 0.35, # Poids de l'accessibilité
+            'distance': 0.25,       # Poids de la distance
+            'size': 0.9,          # Poids de la taille
+            'accessibility': 0.5, # Poids de l'accessibilité
             'max_distance': 20,    # Distance max normalisée (en cellules)
             'depth_penalty': 0.8   # Coefficient de pénalité en profondeur
         }
@@ -348,12 +348,20 @@ class Agent(Node):
                         depth_factor *= self.frontier_weights['depth_penalty']
                         break
 
+        obstacle_count = sum(
+            1 for di in range(-2, 3) for dj in range(-2, 3)
+            if 0 <= i+di < self.h and 0 <= j+dj < self.w
+            and self.map[i+di, j+dj] == OBSTACLE_VALUE
+            )
+        
         # Score final pondéré
         score = (
             norm_distance * self.frontier_weights['distance'] +
             norm_size * self.frontier_weights['size'] + 
             accessibility * self.frontier_weights['accessibility']
         ) * depth_factor
+
+        score *= max(0.1, 1.0 - obstacle_count / 10)
 
         return score
 
@@ -374,7 +382,7 @@ class Agent(Node):
                     )
                     if has_unknown:
                         frontiers.append((i,j))
-                        self.map[i, j] = FRONTIER_VALUE
+                        # self.map[i, j] = FRONTIER_VALUE
         return frontiers
 
 
@@ -431,7 +439,7 @@ class Agent(Node):
         self.publish_frontiers([best_frontier])
         
         # Déclenche immédiatement la navigation
-        self.navigate_to_frontier()
+        self.navigation_loop()
         
         self.get_logger().info(
             f"Nouvelle cible: ({world_x:.2f}, {world_y:.2f}) | Score: {best_score:.2f}",
@@ -446,59 +454,122 @@ class Agent(Node):
 
 
     """======= NAVIGATION ENTRE ROBOT =============="""
-    def navigate_to_frontier(self):
-        """Navigation en coordonnées monde avec contrôle PID"""
-        if not self.assigned_frontier or None in (self.x, self.y, self.yaw):
-            return
+    # def navigate_to_frontier(self):
+    #     """Navigation en coordonnées monde avec contrôle PID"""
+    #     if not self.assigned_frontier or None in (self.x, self.y, self.yaw):
+    #         return
 
-        target_x, target_y = self.assigned_frontier
-        dx = target_x - self.x
-        dy = target_y - self.y
-        distance = np.hypot(dx, dy)
-        self.get_logger().info(f"Distance : {distance} > 1")
+    #     target_x, target_y = self.assigned_frontier
+    #     dx = target_x - self.x
+    #     dy = target_y - self.y
+    #     distance = np.hypot(dx, dy)
+    #     self.get_logger().info(f"Distance : {distance} > 1")
 
-        # Seuil d'arrivée (en mètres)
-        if distance < 1:  # ~3 cellules
-            self.get_logger().info("Cible atteinte!")
-            self.assigned_frontier = None
-            return
+    #     # Seuil d'arrivée (en mètres)
+    #     if distance < 1:  # ~3 cellules
+    #         self.get_logger().info("Cible atteinte!")
+    #         self.assigned_frontier = None
+    #         return
 
-        # Calcul de l'angle cible
-        target_yaw = np.arctan2(dy, dx)
-        yaw_error = (target_yaw - self.yaw + np.pi) % (2 * np.pi) - np.pi  # Normalisation [-π, π]
+    #     # Calcul de l'angle cible
+    #     target_yaw = np.arctan2(dy, dx)
+    #     yaw_error = (target_yaw - self.yaw + np.pi) % (2 * np.pi) - np.pi  # Normalisation [-π, π]
 
-        cmd_vel = Twist()
+    #     cmd_vel = Twist()
         
-        # Contrôle angulaire
-        if abs(yaw_error) > 0.2:  # Seuil de précision (rad)
-            cmd_vel.angular.z = 0.5 * np.clip(yaw_error, -1, 1)
-        else:
-            # Contrôle linéaire
-            cmd_vel.linear.x = 0.2 * min(1.0, distance)
+    #     # Contrôle angulaire
+    #     if abs(yaw_error) > 0.2:  # Seuil de précision (rad)
+    #         cmd_vel.angular.z = 0.5 * np.clip(yaw_error, -1, 1)
+    #     else:
+    #         # Contrôle linéaire
+    #         cmd_vel.linear.x = 0.2 * min(1.0, distance)
 
-        self.cmd_vel_pub.publish(cmd_vel)
+    #     self.cmd_vel_pub.publish(cmd_vel)
+
+
+    # def navigation_loop(self):
+    #     """Boucle de navigation avec A* path planning"""
+    #     if self.assigned_frontier:
+    #         if not hasattr(self, 'current_path') or not self.current_path:
+    #             self.plan_path_to_frontier()
+            
+    #         if hasattr(self, 'current_path') and self.current_path:
+    #             self.follow_path()
+    #         else:
+    #             # Fallback behavior if path planning fails
+    #             cmd_vel = Twist()
+    #             cmd_vel.linear.x = 0.1
+    #             cmd_vel.angular.z = 0.3 if np.random.rand() > 0.5 else -0.3
+    #             self.cmd_vel_pub.publish(cmd_vel)
+    #     else:
+    #         # Default behavior when no target
+    #         cmd_vel = Twist()
+    #         cmd_vel.linear.x = 0.1
+    #         cmd_vel.angular.z = 0.3 if np.random.rand() > 0.5 else -0.3
+    #         self.cmd_vel_pub.publish(cmd_vel)
+    def emergency_avoidance(self):
+        """Demi-tour immédiat + nouvelle cible opposée"""
+        # 1. Arrêt complet
+        cmd = Twist()
+        self.cmd_vel_pub.publish(cmd)
+        
+        # 2. Demi-tour (180°)
+        cmd.angular.z = 0.5  # Vitesse de rotation rad/s
+        start_time = self.get_clock().now()
+        while (self.get_clock().now() - start_time).nanoseconds < 3.14/0.5 * 1e9:  # π/0.5 ≈ 6.28s
+            self.cmd_vel_pub.publish(cmd)
+        
+        # 3. Nouvelle cible opposée au mur
+        self.assigned_frontier = self.get_opposite_target()
+        self.get_logger().warn("Demi-tour d'urgence ! Nouvelle cible opposée.")
+
+
+    def is_wall_ahead(self):
+        """Détecte un mur droit devant le robot (2 cases = ~60cm)"""
+        if not hasattr(self, 'lidar_data'):
+            return False
+        
+        # Zone avant du robot (30° centré sur l'avant)
+        front_angles = [i for i in range(-15, 16)]  # Indices selon votre LIDAR
+        front_distances = [self.lidar_data.ranges[i] for i in front_angles 
+                        if 0 < self.lidar_data.ranges[i] < self.lidar_data.range_max]
+        
+        # Mur détecté si obstacle à moins de 60cm
+        return any(d < 0.6 for d in front_distances)
 
 
     def navigation_loop(self):
-        """Boucle de navigation avec A* path planning"""
-        if self.assigned_frontier:
-            if not hasattr(self, 'current_path') or not self.current_path:
-                self.plan_path_to_frontier()
-            
-            if hasattr(self, 'current_path') and self.current_path:
-                self.follow_path()
-            else:
-                # Fallback behavior if path planning fails
-                cmd_vel = Twist()
-                cmd_vel.linear.x = 0.1
-                cmd_vel.angular.z = 0.3 if np.random.rand() > 0.5 else -0.3
-                self.cmd_vel_pub.publish(cmd_vel)
-        else:
-            # Default behavior when no target
-            cmd_vel = Twist()
-            cmd_vel.linear.x = 0.1
-            cmd_vel.angular.z = 0.3 if np.random.rand() > 0.5 else -0.3
-            self.cmd_vel_pub.publish(cmd_vel)
+        """Boucle de navigation avec sécurité murale"""
+        if self.is_wall_ahead():
+            self.emergency_avoidance()
+            return
+        
+        if not self.assigned_frontier:
+            return
+
+        # Navigation normale
+        if not hasattr(self, 'current_path') or not self.current_path:
+            self.plan_path_to_frontier()
+        self.follow_path()
+
+    
+    def get_opposite_target(self):
+        """Retourne une cible dans la direction opposée au mur"""
+        x, y = self.world_to_map(self.x, self.y)
+        
+        # Vecteur opposé au mur (utilise le yaw actuel)
+        angle = self.yaw + np.pi  # Direction opposée
+        dist = 10 * self.map_msg.info.resolution  # 10 cases devant
+        
+        target_x = x + dist * np.cos(angle)
+        target_y = y + dist * np.sin(angle)
+        
+        # Conversion en coordonnées monde
+        world_x = target_x * self.map_msg.info.resolution + self.map_msg.info.origin.position.x
+        world_y = (self.h - target_y) * self.map_msg.info.resolution + self.map_msg.info.origin.position.y
+        
+        return (world_x, world_y)
+
 
     def plan_path_to_frontier(self):
         """Plan path avec algorithme A*"""
@@ -580,9 +651,13 @@ class Agent(Node):
         return world_path
 
     def follow_path(self):
-        """Suivie du chemin"""
+        """Suivie du chemin"""        
         if not hasattr(self, 'current_path') or not self.current_path:
             return
+
+        # if hasattr(self, 'lidar_data') and min(self.lidar_data.ranges) < 0.3:
+        #     self.handle_obstacle()
+        #     return
             
         # Find the point on the path to aim for
         lookahead_dist = 0.5  # meters
@@ -625,6 +700,17 @@ class Agent(Node):
         
         self.cmd_vel_pub.publish(cmd_vel)
 
+
+    # def handle_obstacle(self):
+    #     """Recule et recalcule le chemin si obstacle détecté"""
+    #     cmd_vel = Twist()
+    #     cmd_vel.linear.x = -0.1  # Recul lent
+    #     cmd_vel.angular.z = 0.5  # Rotation simultanée
+    #     self.cmd_vel_pub.publish(cmd_vel)
+        
+    #     # Réinitialise le chemin et replanifie
+    #     self.current_path = []
+    #     self.plan_path_to_frontier()
 
     def is_target_reached(self):
         """Vérifie si la target actuelle est atteinte"""
