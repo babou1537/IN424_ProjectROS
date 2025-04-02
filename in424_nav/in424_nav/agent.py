@@ -701,17 +701,6 @@ class Agent(Node):
         self.cmd_vel_pub.publish(cmd_vel)
 
 
-    # def handle_obstacle(self):
-    #     """Recule et recalcule le chemin si obstacle détecté"""
-    #     cmd_vel = Twist()
-    #     cmd_vel.linear.x = -0.1  # Recul lent
-    #     cmd_vel.angular.z = 0.5  # Rotation simultanée
-    #     self.cmd_vel_pub.publish(cmd_vel)
-        
-    #     # Réinitialise le chemin et replanifie
-    #     self.current_path = []
-    #     self.plan_path_to_frontier()
-
     def is_target_reached(self):
         """Vérifie si la target actuelle est atteinte"""
         if not self.assigned_frontier:
@@ -764,12 +753,31 @@ class Agent(Node):
 
 def main():
     rclpy.init()
-
     node = Agent()
+
+    start_time = time.time()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
 
-    node.destroy_node()
-    rclpy.shutdown()
+    except KeyboardInterrupt:
+        # Calculs lorsqu'on arrête avec Ctrl+C
+        end_time = time.time()
+        execution_time = end_time - start_time
+        
+        # Calcul du pourcentage exploré
+        total_cells = node.map.shape[0] * node.map.shape[1]
+        explored_cells = np.sum(node.map != UNEXPLORED_SPACE_VALUE)
+        explored_percent = (explored_cells / total_cells) * 100
+        
+        # Affichage des résultats
+        node.get_logger().info("\n" + "="*50)
+        node.get_logger().info(f"Temps d'exécution: {execution_time:.2f} secondes")
+        node.get_logger().info(f"Surface explorée: {explored_percent:.2f}%")
+        node.get_logger().info("Détail:")
+        node.get_logger().info(f"- Cellules explorées: {explored_cells}/{total_cells}")
+        node.get_logger().info(f"- Résolution carte: {node.map_msg.info.resolution:.3f} m/cellule")
+        node.get_logger().info("="*50 + "\n")
+        
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
