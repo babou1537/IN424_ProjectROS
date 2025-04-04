@@ -48,11 +48,18 @@ class Agent(Node):
         }
 
         self.frontier_weights = {
-            'distance': 0.25,       # Poids de la distance
-            'size': 0.9,          # Poids de la taille
-            'accessibility': 0.5, # Poids de l'accessibilité
+            'distance': 0.7,       # Poids de la distance
+            'size': 0.2,          # Poids de la taille
+            'accessibility': 0.4, # Poids de l'accessibilité
             'max_distance': 20,    # Distance max normalisée (en cellules)
-            'depth_penalty': 0.8   # Coefficient de pénalité en profondeur
+            'depth_penalty': 0.2   # Coefficient de pénalité en profondeur
+        }
+
+        
+        self.lidar_params = {
+            'min_distance': 1.1,  # 80cm
+            'fov_degrees': 100,    # ±30°
+            'min_intensity': 0  # Filtre bruit
         }
 
         # Cartographie
@@ -509,40 +516,121 @@ class Agent(Node):
     #         self.cmd_vel_pub.publish(cmd_vel)
     
     def emergency_avoidance(self):
-        """Demi-tour immédiat + nouvelle cible opposée"""
-        # 1. Arrêt complet
+        """Demi-tour forcé avec vérification en boucle"""
+        # 1. Arrêt immédiat
         cmd = Twist()
-        self.cmd_vel_pub.publish(cmd)
+        for _ in range(10):  # Blocage pendant 1s (à 10Hz)
+            self.cmd_vel_pub.publish(cmd)
+            time.sleep(0.1)
         
-        # 2. Demi-tour (180°)
-        cmd.angular.z = 0.5  # Vitesse de rotation rad/s
+        # 2. Rotation jusqu'à ce que le mur ne soit plus visible
         start_time = self.get_clock().now()
-        while (self.get_clock().now() - start_time).nanoseconds < 3.14/0.5 * 1e9:  # π/0.5 ≈ 6.28s
+        cmd.angular.z = 0.5  # Vitesse accrue
+        
+        while (self.get_clock().now() - start_time).nanoseconds < 5e9:  # 5s max
+            if not self.is_wall_ahead():  # Vérification en continu
+                break
             self.cmd_vel_pub.publish(cmd)
         
-        # 3. Nouvelle cible opposée au mur
-        self.assigned_frontier = self.get_opposite_target()
-        self.get_logger().warn("Demi-tour d'urgence ! Nouvelle cible opposée.")
+        # 3. Nouvelle cible à 180° + marge aléatoire
+        self.assigned_frontier = self.get_safe_target()
 
+
+    def get_safe_target(self):
+        """Cible dans la direction opposée avec marge de sécurité"""
+        angle = self.yaw + np.pi + np.random.uniform(-0.5, 0.5)  # 180° ± 30°
+        dist = 8 * self.map_msg.info.resolution  # 8 cases
+        
+        x = self.x + dist * np.cos(angle)
+        y = self.y + dist * np.sin(angle)
+        
+        # Projection sur la carte
+        return (
+            max(self.map_msg.info.origin.position.x + 0.5, 
+                min(x, self.map_msg.info.origin.position.x + self.w * self.map_msg.info.resolution - 0.5)),
+            max(self.map_msg.info.origin.position.y + 0.5,
+                min(y, self.map_msg.info.origin.position.y + self.h * self.map_msg.info.resolution - 0.5))
+        )
+
+
+    # def is_wall_ahead(self):
+    #     """Détection fiable à ±30° (60° FOV centré)"""
+    #     if not hasattr(self, 'lidar_data'):
+    #         return False
+
+    #     # 1. Paramètres LIDAR
+    #     num_readings = len(self.lidar_data.ranges)
+    #     angle_min = self.lidar_data.angle_min  # Ex: -π rad
+    #     angle_max = self.lidar_data.angle_max  # Ex: +π rad
+    #     angle_increment = self.lidar_data.angle_increment  # Ex: 0.0175 rad (1°)
+        
+    #     # 2. Calcul des indices correspondant à ±30°
+    #     center_index = num_readings // 2
+    #     degrees_per_index = np.degrees(angle_increment)
+    #     indices_30deg = int(30 / degrees_per_index)
+        
+    #     start_idx = center_index - indices_30deg
+    #     end_idx = center_index + indices_30deg
+        
+    #     # 3. Analyse des mesures dans le FOV 60°
+    #     danger_zones = []
+    #     for i in range(start_idx, end_idx):
+    #         idx = i % num_readings  # Gestion des bornes circulaires
+            
+    #         # Conditions :
+    #         # - Distance valide
+    #         # - Intensité minimale (filtre faux positifs)
+    #         # - Dans le FOV 60°
+    #         if (0 < self.lidar_data.ranges[idx] < self.lidar_params['min_distance'] and
+    #             self.lidar_data.intensities[idx] > 0.1):
+    #             danger_zones.append(self.lidar_data.ranges[idx])
+        
+    #     # 4. Condition de déclenchement
+    #     return (len(danger_zones) > 3 and  # Minimum 10 mesures valides
+    #             np.mean(danger_zones) < self.lidar_params['min_distance'] - 0.2)
 
     def is_wall_ahead(self):
-        """Détecte un mur droit devant le robot (2 cases = ~60cm)"""
+        """Détection fiable à ±30° (60° FOV centré) sans dépendance à l'intensité"""
         if not hasattr(self, 'lidar_data'):
             return False
+
+        # 1. Paramètres LIDAR
+        num_readings = len(self.lidar_data.ranges)
+        angle_increment = self.lidar_data.angle_increment  # Ex: 0.0175 rad (1°)
         
-        # Zone avant du robot (30° centré sur l'avant)
-        front_angles = [i for i in range(-15, 16)]  # Indices selon votre LIDAR
-        front_distances = [self.lidar_data.ranges[i] for i in front_angles 
-                        if 0 < self.lidar_data.ranges[i] < self.lidar_data.range_max]
+        # 2. Calcul des indices correspondant à ±30°
+        center_index = num_readings // 2
+        degrees_per_index = np.degrees(angle_increment)
+        indices_30deg = int((self.lidar_params['fov_degrees']/2) / degrees_per_index)
         
-        # Mur détecté si obstacle à moins de 60cm
-        return any(d < 0.6 for d in front_distances)
+        start_idx = max(0, center_index - indices_30deg)  # Protection contre les indices négatifs
+        end_idx = min(num_readings, center_index + indices_30deg)  # Protection contre les dépassements
+
+        # 3. Analyse des mesures dans le FOV 60° (sans intensité)
+        danger_zones = []
+        for i in range(start_idx, end_idx):
+            distance = self.lidar_data.ranges[i]
+            
+            # Conditions simplifiées :
+            # - Distance valide (ni NaN, ni inf, ni hors plage)
+            # - Dans la zone de danger
+            if (np.isfinite(distance) and 
+                0 < distance < self.lidar_params['min_distance']):
+                danger_zones.append(distance)
+        
+        # 4. Condition de déclenchement
+        return (len(danger_zones) >= 3 and  # Au moins 2 mesures valides
+                np.mean(danger_zones) < self.lidar_params['min_distance'] - 0.2)
 
 
     def navigation_loop(self):
         """Boucle de navigation avec sécurité murale"""
         if self.is_wall_ahead():
             self.emergency_avoidance()
+            return
+        
+        if self.check_path_collision():
+            self.replan_path()
             return
         
         if not self.assigned_frontier:
@@ -552,6 +640,21 @@ class Agent(Node):
         if not hasattr(self, 'current_path') or not self.current_path:
             self.plan_path_to_frontier()
         self.follow_path()
+
+
+    def check_path_collision(self):
+        """Vérifie les 3 prochaines cases du chemin"""
+        if not hasattr(self, 'current_path') or len(self.current_path) < 2:
+            return False
+            
+        for wx, wy in self.current_path[:4]:
+            x, y = self.world_to_map(wx, wy)
+            if not (0 <= x < self.w and 0 <= y < self.h):
+                return True
+            if self.map[y, x] == OBSTACLE_VALUE:
+                return True
+        return False
+
 
     
     def get_opposite_target(self):
@@ -572,23 +675,92 @@ class Agent(Node):
         return (world_x, world_y)
 
 
+    # def plan_path_to_frontier(self):
+    #     """Plan path avec algorithme A*"""
+    #     if not self.assigned_frontier or None in (self.x, self.y, self.yaw):
+    #         return
+
+    #     start_x, start_y = self.world_to_map(self.x, self.y)
+    #     target_x, target_y = self.world_to_map(*self.assigned_frontier)
+
+    #     # Check if start or target is out of bounds or in obstacle
+    #     if not (0 <= start_x < self.w and 0 <= start_y < self.h) or \
+    #        not (0 <= target_x < self.w and 0 <= target_y < self.h) or \
+    #        self.map[target_y, target_x] == OBSTACLE_VALUE:
+    #         self.get_logger().warn("Invalid start or target position for path planning")
+    #         self.current_path = []
+    #         return
+
+    #     # A* algorithm implementation
+    #     open_set = []
+    #     heapq.heappush(open_set, (0, (start_x, start_y)))
+        
+    #     came_from = {}
+    #     g_score = defaultdict(lambda: float('inf'))
+    #     g_score[(start_x, start_y)] = 0
+        
+    #     f_score = defaultdict(lambda: float('inf'))
+    #     f_score[(start_x, start_y)] = self.heuristic(start_x, start_y, target_x, target_y)
+        
+    #     while open_set:
+    #         current = heapq.heappop(open_set)[1]
+            
+    #         if current == (target_x, target_y):
+    #             self.current_path = self.reconstruct_path(came_from, current)
+    #             return
+                
+    #         for dx, dy in [(0,1), (1,0), (0,-1), (-1,0), (1,1), (-1,1), (1,-1), (-1,-1)]:
+    #             neighbor = (current[0] + dx, current[1] + dy)
+                
+    #             # Check if neighbor is valid
+    #             if not (0 <= neighbor[0] < self.w and 0 <= neighbor[1] < self.h):
+    #                 continue
+                    
+    #             if self.map[neighbor[1], neighbor[0]] == OBSTACLE_VALUE:
+    #                 continue
+                    
+    #             # Diagonal movement cost more
+    #             tentative_g_score = g_score[current] + (1.4 if dx != 0 and dy != 0 else 1.0)
+                
+    #             if tentative_g_score < g_score[neighbor]:
+    #                 came_from[neighbor] = current
+    #                 g_score[neighbor] = tentative_g_score
+    #                 f_score[neighbor] = tentative_g_score + self.heuristic(*neighbor, target_x, target_y)
+    #                 if neighbor not in [i[1] for i in open_set]:
+    #                     heapq.heappush(open_set, (f_score[neighbor], neighbor))
+        
+    #     # If we get here, no path was found
+    #     self.get_logger().warn("No valid path found to target")
+    #     self.current_path = []
+
+    def is_near_obstacle(self, x, y, radius=2):
+        """Vérifie si une case est trop proche d'un obstacle"""
+        for di in range(-radius, radius+1):
+            for dj in range(-radius, radius+1):
+                nx, ny = x + di, y + dj
+                if 0 <= nx < self.w and 0 <= ny < self.h:
+                    if self.map[ny, nx] == OBSTACLE_VALUE:
+                        return True
+        return False
+
+
     def plan_path_to_frontier(self):
-        """Plan path avec algorithme A*"""
+        """A* avec zone de sécurité de 2 cases autour des obstacles"""
         if not self.assigned_frontier or None in (self.x, self.y, self.yaw):
             return
 
         start_x, start_y = self.world_to_map(self.x, self.y)
         target_x, target_y = self.world_to_map(*self.assigned_frontier)
 
-        # Check if start or target is out of bounds or in obstacle
+        # Vérification des positions valides
         if not (0 <= start_x < self.w and 0 <= start_y < self.h) or \
-           not (0 <= target_x < self.w and 0 <= target_y < self.h) or \
-           self.map[target_y, target_x] == OBSTACLE_VALUE:
-            self.get_logger().warn("Invalid start or target position for path planning")
+        not (0 <= target_x < self.w and 0 <= target_y < self.h) or \
+        self.is_near_obstacle(target_x, target_y, radius=1):  # Nouvelle vérification
+            self.get_logger().warn("Position cible trop proche d'un obstacle")
             self.current_path = []
             return
 
-        # A* algorithm implementation
+        # A* modifié
         open_set = []
         heapq.heappush(open_set, (0, (start_x, start_y)))
         
@@ -606,29 +778,31 @@ class Agent(Node):
                 self.current_path = self.reconstruct_path(came_from, current)
                 return
                 
-            for dx, dy in [(0,1), (1,0), (0,-1), (-1,0), (1,1), (-1,1), (1,-1), (-1,-1)]:
+            for dx, dy in [(0,1),(1,0),(0,-1),(-1,0),(1,1),(-1,1),(1,-1),(-1,-1)]:
                 neighbor = (current[0] + dx, current[1] + dy)
                 
-                # Check if neighbor is valid
+                # Vérification renforcée
                 if not (0 <= neighbor[0] < self.w and 0 <= neighbor[1] < self.h):
                     continue
                     
-                if self.map[neighbor[1], neighbor[0]] == OBSTACLE_VALUE:
+                if self.is_near_obstacle(*neighbor, radius=2):  # <-- Nouveau filtre
                     continue
                     
-                # Diagonal movement cost more
-                tentative_g_score = g_score[current] + (1.4 if dx != 0 and dy != 0 else 1.0)
+                # Coût de déplacement (diagonale = 1.4)
+                move_cost = 1.4 if dx !=0 and dy !=0 else 1.0
+                tentative_g = g_score[current] + move_cost
                 
-                if tentative_g_score < g_score[neighbor]:
+                if tentative_g < g_score[neighbor]:
                     came_from[neighbor] = current
-                    g_score[neighbor] = tentative_g_score
-                    f_score[neighbor] = tentative_g_score + self.heuristic(*neighbor, target_x, target_y)
-                    if neighbor not in [i[1] for i in open_set]:
-                        heapq.heappush(open_set, (f_score[neighbor], neighbor))
+                    g_score[neighbor] = tentative_g
+                    f_score[neighbor] = tentative_g + self.heuristic(*neighbor, target_x, target_y)
+                    heapq.heappush(open_set, (f_score[neighbor], neighbor))
         
-        # If we get here, no path was found
-        self.get_logger().warn("No valid path found to target")
+        self.get_logger().warn("Aucun chemin sûr trouvé (marge de sécurité active)")
         self.current_path = []
+
+
+
 
     def heuristic(self, x1, y1, x2, y2):
         """Euclidean distance heuristic for A*"""
@@ -650,16 +824,25 @@ class Agent(Node):
             world_path.append((world_x, world_y))
         
         return world_path
+    
 
     def follow_path(self):
         """Suivie du chemin"""        
-        if not hasattr(self, 'current_path') or not self.current_path:
+        if self.is_wall_ahead():
+            self.emergency_avoidance()
             return
+        
 
+        if self.check_path_collision():
+            self.replan_path()
+            return
+    
         # if hasattr(self, 'lidar_data') and min(self.lidar_data.ranges) < 0.3:
         #     self.handle_obstacle()
         #     return
-            
+        if not hasattr(self, 'current_path') or not self.current_path:
+            return   
+         
         # Find the point on the path to aim for
         lookahead_dist = 0.5  # meters
         target_point = None
@@ -700,6 +883,14 @@ class Agent(Node):
             cmd_vel.angular.z = 0.3 * angle_diff
         
         self.cmd_vel_pub.publish(cmd_vel)
+
+
+    def replan_path(self):
+        """Replanification avec pénalité sur la zone dangereuse"""
+        # x, y = self.world_to_map(*self.current_path[0])
+        # self.map[y, x] = OBSTACLE_VALUE  # Marque temporairement comme obstacle
+        self.plan_path_to_frontier()
+        self.get_logger().warn("Replanification du chemin détourné !")
 
 
     def is_target_reached(self):
