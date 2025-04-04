@@ -507,6 +507,7 @@ class Agent(Node):
     #         cmd_vel.linear.x = 0.1
     #         cmd_vel.angular.z = 0.3 if np.random.rand() > 0.5 else -0.3
     #         self.cmd_vel_pub.publish(cmd_vel)
+    
     def emergency_avoidance(self):
         """Demi-tour immédiat + nouvelle cible opposée"""
         # 1. Arrêt complet
