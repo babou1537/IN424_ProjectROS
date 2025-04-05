@@ -48,9 +48,9 @@ class Agent(Node):
         }
 
         self.frontier_weights = {
-            'distance': 0.7,       # Poids de la distance
-            'size': 0.2,          # Poids de la taille
-            'accessibility': 0.4, # Poids de l'accessibilité
+            'distance': 0.3,       # Poids de la distance
+            'size': 0.8,           # Poids de la taille
+            'accessibility': 0.3,  # Poids de l'accessibilité
             'max_distance': 20,    # Distance max normalisée (en cellules)
             'depth_penalty': 0.2   # Coefficient de pénalité en profondeur
         }
@@ -58,8 +58,7 @@ class Agent(Node):
         
         self.lidar_params = {
             'min_distance': 1.1,  # 80cm
-            'fov_degrees': 100,    # ±30°
-            'min_intensity': 0  # Filtre bruit
+            'fov_degrees': 120,    # ±30°
         }
 
         # Cartographie
@@ -88,12 +87,16 @@ class Agent(Node):
         self.create_subscription(Int32MultiArray, '/shared_frontiers', self.frontiers_cb, 10)
         self.create_subscription(String, '/frontier_owners', self.owners_cb, 10)
 
+        self.frontier_timer = self.create_timer(self.nav_params['target_refresh_rate'], self.update_frontiers)
+
         #Create timers to autonomously call the following methods periodically
         self.create_timer(0.3, self.map_update) #0.2s of period <=> 5 Hz
         self.create_timer(1.0, self.update_frontiers)  # ~3Hz
         self.create_timer(0.1, self.navigation_loop)
-        self.create_timer(0.5, self.strategy)        #0.5s of period <=> 2 Hz
+        # self.create_timer(0.5, self.strategy)        #0.5s of period <=> 2 Hz
         self.create_timer(0.5, self.publish_maps) #1Hz
+
+
         
     
 
@@ -272,27 +275,27 @@ class Agent(Node):
         self.map_agent_pub.publish(self.map_msg)    #publish map to other agents
 
 
-    def strategy(self):
-        """Decision layer unifié"""
-        if not hasattr(self, 'map') or self.x is None:
-            return
+    # def strategy(self):
+    #     """Decision layer unifié"""
+    #     if not hasattr(self, 'map') or self.x is None:
+    #         return
         
-        # Si déjà une target, laisser update_frontiers gérer
-        if self.assigned_frontier:
-            return
+    #     # Si déjà une target, laisser update_frontiers gérer
+    #     if self.assigned_frontier:
+    #         return
         
-        # Comportement par défaut
-        cmd_vel = Twist()
+    #     # Comportement par défaut
+    #     cmd_vel = Twist()
         
-        # Éviter les obstacles (à améliorer)
-        if hasattr(self, 'lidar_data'):
-            front_obstacle = any(0 < d < 0.5 for d in self.lidar_data.ranges[:30]+self.lidar_data.ranges[-30:])
-            if front_obstacle:
-                cmd_vel.angular.z = 0.7
-            else:
-                cmd_vel.linear.x = 0.2
+    #     # Éviter les obstacles (à améliorer)
+    #     if hasattr(self, 'lidar_data'):
+    #         front_obstacle = any(0 < d < 0.5 for d in self.lidar_data.ranges[:30]+self.lidar_data.ranges[-30:])
+    #         if front_obstacle:
+    #             cmd_vel.angular.z = 0.7
+    #         else:
+    #             cmd_vel.linear.x = 0.2
         
-        self.cmd_vel_pub.publish(cmd_vel)
+    #     self.cmd_vel_pub.publish(cmd_vel)
 
 
     def world_to_map(self, world_x, world_y):
@@ -304,6 +307,29 @@ class Agent(Node):
     def is_leader(self):
         """Détermine si cet agent est le leader"""
         return int(self.ns[-1]) == 1 and self.nb_agents > 1
+
+
+    def update_frontiers(self):
+        """Version optimisée avec gestion fluide des targets"""
+        # Recalcule seulement si le timer est écoulé
+        now = self.get_clock().now()
+        if hasattr(self, 'last_frontier_update'):
+            elapsed = (now - self.last_frontier_update).nanoseconds / 1e9
+            if elapsed < self.nav_params['target_refresh_rate']:
+                return
+        
+        self.last_frontier_update = now
+        
+        frontiers = self.detect_frontiers()
+        if not frontiers:
+            return
+        
+        # Change de target seulement si nécessaire
+        if (self.assigned_frontier is None 
+            or self.is_target_reached()
+            or not self.is_making_progress()):
+            
+            self.allocate_frontiers(frontiers)
 
 
     def evaluate_frontier(self, frontier):
@@ -405,6 +431,7 @@ class Agent(Node):
         assign_msg.data = json.dumps({self.ns: frontiers})
         self.id_pub.publish(assign_msg)
 
+
     def frontiers_cb(self, msg):
         """Reçoit les positions des frontières"""
         frontiers = [(msg.data[i], msg.data[i+1]) for i in range(0, len(msg.data), 2)]
@@ -433,7 +460,14 @@ class Agent(Node):
         ]
 
         if not available:
+            self.get_logger().warn("Aucune frontière disponible (toutes prises ou conflits)")
             return None
+
+        """V1.0"""
+        best_score, best_frontier = max( available,key=lambda x: (
+            x[0] * self.proximity_penalty(x[1])  # Applique un facteur de pénalité si proximité
+        ))
+        """V1.0 FIN"""
 
         available.sort(reverse=True, key=lambda x: x[0])
         best_score, best_frontier = available[0]
@@ -454,11 +488,39 @@ class Agent(Node):
         )
         return best_frontier
     
+    
     def check_frontier_conflict(self, frontier):
         """Vérifie si une frontière est déjà prise"""
         return (tuple(frontier) in self.shared_frontiers and 
                 self.shared_frontiers[tuple(frontier)] != self.ns)
 
+
+    """V1.0"""
+    def proximity_penalty(self, frontier):
+        """Pénalise les frontières proches d'autres cibles assignées"""
+        min_distance = 10  # En cases (≈2m si résolution 0.2m/case)
+        
+        for assigned_pos, robot_id in self.shared_frontiers.items():
+            if robot_id == self.ns:
+                continue
+                
+            dist = np.sqrt((frontier[0]-assigned_pos[0])**2 + (frontier[1]-assigned_pos[1])**2)
+            if dist < min_distance:
+                return 0.5  # Réduit le score de 50% si trop proche
+                
+        return 1.0  # Pas de pénalité
+    
+    """V1.2"""
+    # def proximity_penalty(self, frontier):
+    #     max_dist = 15
+    #     min_penalty = 0.3  # Même la pire case garde 30% de son score
+        
+    #     closest_dist = min(
+    #         np.sqrt((f[0]-frontier[0])**2 + (f[1]-frontier[1])**2)
+    #         for f in self.shared_frontiers.keys()
+    #     )
+        
+    #     return max(min_penalty, min(1.0, closest_dist / max_dist))
 
     """======= NAVIGATION ENTRE ROBOT =============="""
     # def navigate_to_frontier(self):
@@ -515,24 +577,64 @@ class Agent(Node):
     #         cmd_vel.angular.z = 0.3 if np.random.rand() > 0.5 else -0.3
     #         self.cmd_vel_pub.publish(cmd_vel)
     
+    """V0"""
+    # def emergency_avoidance(self):
+    #     """Demi-tour forcé avec vérification en boucle"""
+    #     # 1. Arrêt immédiat
+    #     cmd = Twist()
+    #     for _ in range(10):  # Blocage pendant 1s (à 10Hz)
+    #         self.cmd_vel_pub.publish(cmd)
+    #         time.sleep(0.1)
+        
+    #     # 2. Rotation jusqu'à ce que le mur ne soit plus visible
+    #     start_time = self.get_clock().now()
+    #     cmd.angular.z = 0.5  # Vitesse accrue
+        
+    #     while (self.get_clock().now() - start_time).nanoseconds < 5e9:  # 5s max
+    #         if not self.is_wall_ahead():  # Vérification en continu
+    #             break
+    #         self.cmd_vel_pub.publish(cmd)
+        
+    #     # 3. Nouvelle cible à 180° + marge aléatoire
+    #     self.assigned_frontier = self.get_safe_target()
+
     def emergency_avoidance(self):
-        """Demi-tour forcé avec vérification en boucle"""
-        # 1. Arrêt immédiat
+        """Évitement d'urgence avec recul + rotation + avancée contrôlée"""
+        # 1. Arrêt et recul immédiat (1 seconde)
         cmd = Twist()
-        for _ in range(10):  # Blocage pendant 1s (à 10Hz)
+        cmd.linear.x = -0.3  # Recul à vitesse modérée
+        start_time = time.time()
+        while time.time() - start_time < 1.0:
             self.cmd_vel_pub.publish(cmd)
             time.sleep(0.1)
-        
-        # 2. Rotation jusqu'à ce que le mur ne soit plus visible
-        start_time = self.get_clock().now()
-        cmd.angular.z = 0.5  # Vitesse accrue
-        
-        while (self.get_clock().now() - start_time).nanoseconds < 5e9:  # 5s max
-            if not self.is_wall_ahead():  # Vérification en continu
+
+        # 2. Rotation jusqu'à ce que le mur ne soit plus visible (avec timeout)
+        cmd.linear.x = 0.0
+        cmd.angular.z = 0.8  # Vitesse de rotation modérée
+        start_time = time.time()
+        while (time.time() - start_time < 5.0):  # Timeout de 3 secondes
+            if not self.is_wall_ahead():
                 break
             self.cmd_vel_pub.publish(cmd)
+            time.sleep(0.1)
+
+        # 3. Avancée de 2-3 cases dans la nouvelle direction
+        cmd.angular.z = 0.0
+        cmd.linear.x = 0.2  # Vitesse réduite pour plus de précision
         
-        # 3. Nouvelle cible à 180° + marge aléatoire
+        # Calcul de la distance à parcourir (2-3 cases)
+        target_distance = 2.5 * self.map_msg.info.resolution  # Convertit les cases en mètres
+        start_x, start_y = self.x, self.y
+        distance_traveled = 0.0
+        
+        while distance_traveled < target_distance:
+            current_x, current_y = self.x, self.y  # Doit être mis à jour via l'odométrie
+            distance_traveled = np.sqrt((current_x - start_x)**2 + (current_y - start_y)**2)
+            self.cmd_vel_pub.publish(cmd)
+            time.sleep(0.1)
+
+        # 4. Arrêt et nouvelle cible
+        self.cmd_vel_pub.publish(Twist())
         self.assigned_frontier = self.get_safe_target()
 
 
@@ -642,6 +744,7 @@ class Agent(Node):
         self.follow_path()
 
 
+
     def check_path_collision(self):
         """Vérifie les 3 prochaines cases du chemin"""
         if not hasattr(self, 'current_path') or len(self.current_path) < 2:
@@ -742,6 +845,30 @@ class Agent(Node):
                     if self.map[ny, nx] == OBSTACLE_VALUE:
                         return True
         return False
+    
+    def is_near_other_robot(self, x, y, safety_radius=5):
+        """
+        Vérifie si la position (x,y) est trop proche d'un autre robot.
+        safety_radius: nombre de cases à éviter (ex: 5 cases = 1m si résolution 0.2m/case)
+        """
+        if not hasattr(self, 'agents_pose') or self.agents_pose is None:
+            return False
+        
+        for i, (other_x, other_y) in enumerate(self.agents_pose):
+            # Skip soi-même et les robots sans position
+            if i == int(self.ns[-1]) - 1 or other_x is None or other_y is None:
+                continue
+            
+            # Conversion en coordonnées carte si nécessaire
+            other_mx, other_my = self.world_to_map(other_x, other_y)
+            
+            # Distance en cases
+            distance = max(abs(x - other_mx), abs(y - other_my))
+            
+            if distance < safety_radius:
+                return True
+                
+        return False
 
 
     def plan_path_to_frontier(self):
@@ -785,7 +912,8 @@ class Agent(Node):
                 if not (0 <= neighbor[0] < self.w and 0 <= neighbor[1] < self.h):
                     continue
                     
-                if self.is_near_obstacle(*neighbor, radius=2):  # <-- Nouveau filtre
+                if (self.is_near_obstacle(*neighbor, radius=2) or 
+                    self.is_near_other_robot(*neighbor, safety_radius=3)):  # <-- Nouveau filtre check EVITEMENT
                     continue
                     
                 # Coût de déplacement (diagonale = 1.4)
@@ -893,6 +1021,8 @@ class Agent(Node):
         self.get_logger().warn("Replanification du chemin détourné !")
 
 
+
+    """A VERIFIER SI UTILISE"""
     def is_target_reached(self):
         """Vérifie si la target actuelle est atteinte"""
         if not self.assigned_frontier:
@@ -921,27 +1051,7 @@ class Agent(Node):
         return distance > 2
     
 
-    def update_frontiers(self):
-        """Version optimisée avec gestion fluide des targets"""
-        # Recalcule seulement si le timer est écoulé
-        now = self.get_clock().now()
-        if hasattr(self, 'last_frontier_update'):
-            elapsed = (now - self.last_frontier_update).nanoseconds / 1e9
-            if elapsed < self.nav_params['target_refresh_rate']:
-                return
-        
-        self.last_frontier_update = now
-        
-        frontiers = self.detect_frontiers()
-        if not frontiers:
-            return
-        
-        # Change de target seulement si nécessaire
-        if (self.assigned_frontier is None 
-            or self.is_target_reached()
-            or not self.is_making_progress()):
-            
-            self.allocate_frontiers(frontiers)
+    
 
 def main():
     rclpy.init()
