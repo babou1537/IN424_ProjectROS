@@ -1023,16 +1023,16 @@ def main():
         rclpy.spin(node)
 
     except KeyboardInterrupt:
-        # Calculs lorsqu'on arrête avec Ctrl+C
+        # Calculations when stopping with Ctrl+C
         end_time = time.time()
         execution_time = end_time - start_time
         
-        # Calcul du pourcentage exploré
+        # Calculation of percentage scanned
         total_cells = node.map.shape[0] * node.map.shape[1]
         explored_cells = np.sum(node.map != UNEXPLORED_SPACE_VALUE)
         explored_percent = (explored_cells / total_cells) * 100
         
-        # Affichage des résultats
+        # Display results
         node.get_logger().info("\n" + "="*50)
         node.get_logger().info(f"Temps d'exécution: {execution_time:.2f} secondes")
         node.get_logger().info(f"Surface explorée: {explored_percent:.2f}%")
