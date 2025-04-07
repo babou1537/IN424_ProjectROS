@@ -4,6 +4,7 @@ __credits__ = ["Johvany Gustave", "Jonatan Alvarez"]
 __license__ = "Apache License 2.0"
 __version__ = "1.0.0"
 
+"""TEAM GROUP : SETB // ABDILLAH / DJUNTE-GHOMSI / FAURÉ / IACOB / MATHIEU"""
 
 #Map cell values to set
 OBSTACLE_VALUE = 100
